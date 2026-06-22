@@ -1,0 +1,265 @@
+\section{Adaptations in \texttt{fss\_SAT.py}}
+\label{sec:adaptations}
+
+The changes fall into three groups: performance rewrites that leave the result
+of \citet{faggian2015} unchanged (Sections~\ref{sec:filter}--\ref{sec:score}),
+feature extensions (Sections~\ref{sec:modes}--\ref{sec:parallel}), and
+algorithmic additions that go beyond the original method
+(Sections~\ref{sec:nan}--\ref{sec:cwfss}). Table~\ref{tab:overview} gives an
+overview.
+
+\begin{table}[ht!]
+\centering
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Where} & \textbf{Change} & \textbf{Effect} \\
+\midrule
+\texttt{integral\_filter}   & \texttt{np.pad} + slicing   & same result, faster, no fancy indexing \\
+\texttt{\_fss\_score}        & BLAS dot products           & same result, no temporary arrays \\
+\texttt{\_build\_binary\_sat} & threshold modes            & \texttt{over}/\texttt{under}/\texttt{between}/\texttt{tolerance} \\
+\texttt{fss\_threshold}      & percentile thresholds       & threshold given as a percentile of the field \\
+\texttt{fss\_threshold}      & over-estimation \texttt{ovest} & frequency-bias diagnostic returned with FSS \\
+\texttt{fss\_threshold\_eps} & ensemble FSS                & 3D forecast stack, exceedance probability \\
+\texttt{fss\_cumsum\_parallel} & \texttt{joblib}           & threshold sweep optionally parallel (\texttt{n\_jobs}) \\
+\texttt{\_fss\_score\_masked} & per-window valid weighting & transparent missing-data (NaN) handling \\
+\texttt{CWFSS}               & R2 sampling, bootstrap, NaN & continuous/weighted FSS \\
+\bottomrule
+\end{tabularx}
+\caption{Overview of the adaptations made on top of the \citet{faggian2015}
+reference implementation.}
+\label{tab:overview}
+\end{table}
+
+\subsection{Vectorised neighbourhood filter}
+\label{sec:filter}
+
+The reference \codeword{integral_filter} (Section~\ref{sec:baseline}) builds two
+full coordinate grids with \codeword{np.mgrid}, clips them, and gathers the four
+corner tables with fancy indexing. The rewrite achieves the identical clamped
+box-sum of Eq.~\eqref{eq:boxsum} with edge-replicated padding and plain
+contiguous slicing, which avoids the large index arrays and the gather:
+
+{\setstretch{1}\begin{lstlisting}[style=python]
+w = n // 2
+if w < 1:
+    return field
+rows, cols = field.shape[-2], field.shape[-1]
+D = 2 * w
+p = np.pad(field, w, mode='edge')          # 2D case
+return (p[D:D+rows, D:D+cols] + p[:rows, :cols]
+      - p[:rows, D:D+cols] - p[D:D+rows, :cols])
+\end{lstlisting}}
+
+Padding the integral table with \codeword{mode='edge'} replicates the boundary
+rows and columns, so a corner lookup that would have been clamped to the last
+valid index instead reads the replicated edge value --- exactly what the
+original \codeword{np.clip} produced. The boundary behaviour is therefore
+\emph{identical} to the reference implementation; only the data access pattern
+changes. The 3D (ensemble) case pads only the two trailing spatial axes.
+
+\subsection{BLAS dot-product score}
+\label{sec:score}
+
+The reference \codeword{fss} scales both windowed fields to fractions and then
+forms two temporary arrays, \codeword{(fhat-ohat)**2} and
+\codeword{fhat**2+ohat**2}, before averaging. The rewrite (\codeword{_fss_score})
+expresses the same quantities through three inner products of the
+\emph{unscaled} box sums $S_f$, $S_o$, which BLAS evaluates without allocating
+temporaries:
+%
+\begin{equation}
+  \begin{aligned}
+  \mathit{ff} &= \textstyle\sum_i S_f^2, &\quad
+  \mathit{oo} &= \textstyle\sum_i S_o^2, &\quad
+  \mathit{fo} &= \textstyle\sum_i S_f S_o .
+  \end{aligned}
+\end{equation}
+%
+Using the identity $\sum_i (S_f-S_o)^2 = \mathit{ff} + \mathit{oo} -
+2\,\mathit{fo}$ and writing $A=(2w+1)^2$ for the window area, the numerator and
+denominator of Eq.~\eqref{eq:fss} become
+%
+\begin{equation}
+  \mathrm{num} = \frac{1}{A^2}\,\frac{\mathit{ff}+\mathit{oo}-2\,\mathit{fo}}{N},
+  \qquad
+  \mathrm{denom} = \frac{1}{A^2}\,\frac{\mathit{ff}+\mathit{oo}}{N},
+\end{equation}
+%
+where $A^{-2}$ is the constant \codeword{inv_area_sq} factor (the fractions
+$p=S/A$ enter squared). This is algebraically identical to the reference
+result, but the score reduces to three \codeword{np.dot} calls plus scalar
+arithmetic:
+
+{\setstretch{1}\begin{lstlisting}[style=python]
+ff = np.dot(fflat, fflat); oo = np.dot(oflat, oflat); fo = np.dot(fflat, oflat)
+num   = inv_area_sq * (ff + oo - 2.0 * fo) / n
+denom = inv_area_sq * (ff + oo) / n
+if denom == 0.0:
+    return 0.0, 0.0, np.nan
+return num, denom, 1.0 - num / denom
+\end{lstlisting}}
+
+Note that \codeword{np.dot} is not NaN-aware, unlike the reference
+\codeword{np.nanmean}. This fast path is therefore only taken when the fields
+contain no missing data; the missing-data case is handled separately
+(Section~\ref{sec:nan}).
+
+\subsection{Threshold modes and percentile thresholds}
+\label{sec:modes}
+
+The reference implementation binarises with a single ``over'' comparison
+($\text{field} > t$). \texttt{fss\_SAT.py} factors the binarisation into
+\codeword{_build_binary_sat} and supports four \codeword{threshold_mode} values:
+%
+\begin{description}
+  \item[\texttt{over}] $\text{field} > t$ (default, the classic FSS);
+  \item[\texttt{under}] $\text{field} \le t$;
+  \item[\texttt{between}] $t_1 < \text{field} \le t_2$, for verification of a
+        value band (in the sweep, an extra lower edge $-1$ is inserted so that
+        the lowest band still captures the zero values);
+  \item[\texttt{tolerance}] $(1-\tau)\,t < \text{field} \le (1+\tau)\,t$,
+        a relative tolerance band of half-width $\tau$ (\codeword{tolerance})
+        around $t$.
+\end{description}
+%
+Independently, \codeword{percentiles=True} interprets the threshold as a
+percentile of the field rather than an absolute value; the forecast and
+observation thresholds are then derived separately with \codeword{np.percentile}
+(\codeword{np.nanpercentile} on the missing-data path).
+
+\subsection{Over-estimation diagnostic}
+\label{sec:ovest}
+
+Alongside the numerator, denominator and score, \codeword{fss_threshold} now
+returns an over-estimation (frequency-bias) value
+%
+\begin{equation}
+  \mathrm{ovest} = \frac{\#\{\text{fcst} > t\} - \#\{\text{obs} > t\}}
+                        {N_\text{points}},
+\end{equation}
+%
+the difference between the forecast and observed event counts normalised by the
+number of points. It is a domain-wide bias indicator and is broadcast to the
+shape of the window axis so it travels through the same return structure as the
+score. On the missing-data path it is computed over valid points only.
+
+\subsection{Ensemble FSS (eFSS)}
+\label{sec:eps}
+
+\codeword{fss_threshold_eps} implements the ensemble extension of the FSS in the
+spirit of \citet{duc2013}. The forecast is a 3D stack (members $\times$ rows
+$\times$ cols). Instead of a binary forecast field, the per-point
+\emph{exceedance probability} across members is used,
+%
+\begin{equation}
+  p_f(i,j) = \frac{1}{M}\sum_{m=1}^{M}\mathbb{1}\!\left[\,\text{fcst}_m(i,j)
+             \text{ exceeds } t\,\right],
+\end{equation}
+%
+($M$ = number of members), and this probability field is fed into the same SAT
+machinery as the deterministic case. The observation remains a single 2D field.
+An assertion enforces the 3D forecast shape.
+
+\subsection{Threshold sweep and parallelisation}
+\label{sec:parallel}
+
+\codeword{fss_cumsum_parallel} sweeps a list of thresholds, calling
+\codeword{fss_threshold} (or \codeword{fss_threshold_eps} when
+\codeword{eps=True}) once per threshold and reusing the cached integral tables
+across all windows. The sweep can run serially (\codeword{n_jobs=1}) or in
+parallel over thresholds through \codeword{joblib} (\codeword{n_jobs>1}):
+
+{\setstretch{1}\begin{lstlisting}[style=python]
+if n_jobs == 1:
+    ret = [use_fss_threshold_func(fcst, obs, t1, t2, windows, ...) for t1, t2 in calls]
+else:
+    from joblib import Parallel, delayed
+    ret = Parallel(n_jobs=n_jobs)(
+        delayed(use_fss_threshold_func)(fcst, obs, t1, t2, windows, ...) for t1, t2 in calls)
+\end{lstlisting}}
+
+\codeword{fss_cumsum_frame} wraps the sweep and returns pandas
+\codeword{DataFrame}s of numerator, denominator, score and over-estimation
+(indexed by threshold, columns by window), or just the raw score array when
+\codeword{raw=True}. Note that, because BLAS itself is multi-threaded,
+oversubscription can occur when \codeword{n_jobs>1}; the benchmark
+\codeword{bench_njobs.py} measures this with and without pinning the BLAS thread
+count.
+
+\subsection{Missing-data handling via per-window valid-point weighting}
+\label{sec:nan}
+
+This is the most substantial addition. The reference method has no concept of
+missing data; a single NaN would propagate through the cumulative sums and
+poison the whole table. \texttt{fss\_SAT.py} adds a mask-aware path that treats
+a grid point as \emph{missing} when either the forecast \emph{or} the
+observation is NaN there (\codeword{_validity_mask}). The clean path is taken
+whenever the mask is all-valid, so fields without NaNs are unaffected and pay no
+extra cost.
+
+When NaNs are present, the binary fields are zeroed at missing points before the
+SAT is built (\codeword{_build_binary_sat_masked}), so missing points never
+contribute to a window sum. Each window is then weighted by its number of
+\emph{valid} points,
+%
+\begin{equation}
+  C = A - (\text{missing points in the window}),
+  \label{eq:validcount}
+\end{equation}
+%
+where $A=(2w+1)^2$ is the full window area and the missing-point count itself is
+obtained from a SAT of the invalid mask (\codeword{_invalid_sat}) sampled with
+the same \codeword{integral_filter}. With $S_f$, $S_o$ the box sums of the
+mask-zeroed binary fields, the windowed fractions are $p_f=S_f/C$, $p_o=S_o/C$,
+and weighting each window centre by $C$ collapses the weighted means to
+%
+\begin{equation}
+  \mathrm{num} = \frac{\sum_w (S_f-S_o)^2 / C}{\sum_w C},
+  \qquad
+  \mathrm{denom} = \frac{\sum_w (S_f^2+S_o^2) / C}{\sum_w C}
+  \label{eq:maskedscore}
+\end{equation}
+%
+(\codeword{_fss_score_masked}). Windows with no valid points ($C=0$) drop out
+naturally. The construction is deliberately consistent with the clean path: with
+no missing data $C\equiv A$ everywhere, and Eq.~\eqref{eq:maskedscore} reduces
+\emph{bit-for-bit} to the standard score of Section~\ref{sec:score}. Percentile
+thresholds on this path use \codeword{np.nanpercentile}.
+
+The same weighting is wired into the ensemble path (\codeword{fss_threshold_eps},
+Section~\ref{sec:eps}): there a grid point counts when the observation is valid
+\emph{and} at least one member is valid, and the exceedance probability is
+averaged over the valid members only (\codeword{_eps_prob_masked}).
+
+\subsection{Continuous/weighted FSS (\texttt{CWFSS})}
+\label{sec:cwfss}
+
+\codeword{CWFSS} aggregates the FSS over a \emph{range} of thresholds and
+windows into a single scalar, instead of reporting the full
+threshold\,$\times$\,window table. It draws \codeword{nsamples} (threshold,
+window) pairs from the low-discrepancy R2 sequence (\codeword{R2}), which gives
+even coverage of the 2D parameter space without a fixed grid, and computes the
+FSS for each pair. Each sample is weighted by a threshold factor and a window
+factor,
+%
+\begin{equation}
+  \text{t\_factor} = \frac{t_\text{max}+t}{t_\text{max}},
+  \qquad
+  \text{w\_factor} = \frac{2\,w_\text{max}}{w_\text{max}+w},
+\end{equation}
+%
+emphasising higher thresholds and smaller windows, and the weighted scores are
+normalised by their achievable maximum to yield \codeword{self.cwfss}. A
+\codeword{bootstrap} method resamples the stored per-sample scores to obtain a
+confidence distribution.
+
+\codeword{CWFSS} carries the same extensions as the batch functions. It honours
+\codeword{threshold_mode}/\codeword{tolerance} through a shared
+\codeword{_binarise} helper, and it is NaN-aware: threshold limits use
+\codeword{np.nanmax}/\codeword{np.nanpercentile}, and when the fields contain
+NaNs it uses the masked score of Eq.~\eqref{eq:maskedscore}. Samples whose FSS
+is undefined (NaN, e.g.\ a window with no valid exceedance) are dropped from the
+\codeword{np.nanmean}, and the theoretical maximum is masked identically so the
+achievable ceiling stays at $1$ and is not lowered merely by the presence of
+missing data.

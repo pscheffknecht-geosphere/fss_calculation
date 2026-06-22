@@ -1,0 +1,59 @@
+\section{Introduction}
+
+The Fractions Skill Score (FSS) is a neighbourhood-based verification metric
+for spatial forecasts, introduced by \citet{roberts2008}. Rather than comparing
+forecast and observation values point by point, it compares the \emph{fraction}
+of grid points that exceed a given threshold within a sliding window
+(neighbourhood), as a function of both the threshold and the window
+(neighbourhood) size. This avoids the \emph{double penalty} that afflicts
+point-wise scores when a feature is forecast with a small spatial displacement
+and reveals the spatial scale at which a forecast attains useful skill. It does
+so by treating the spatial distribution of events within a window
+probabilistically: a perfect forecast is one with the same event frequency as
+the observation within the window, regardless of the exact placement.
+
+For a single threshold and window size the score is \citep{roberts2008}
+%
+\begin{equation}
+  \mathrm{FSS} = 1 -
+  \frac{\dfrac{1}{N}\displaystyle\sum_{i=1}^{N}\bigl(p_f - p_o\bigr)^2}
+       {\dfrac{1}{N}\displaystyle\sum_{i=1}^{N}p_f^{\,2}
+        + \dfrac{1}{N}\displaystyle\sum_{i=1}^{N}p_o^{\,2}},
+  \label{eq:fss}
+\end{equation}
+%
+where $N$ is the number of windows in the domain (one centred on each grid
+point), $p_f$ is the forecast fraction and $p_o$ the observed fraction of the
+window. $\mathrm{FSS}=1$ denotes a perfect forecast and $\mathrm{FSS}=0$ no
+skill.
+
+The cost of the FSS comes from evaluating the windowed fractions $p_f$, $p_o$
+for many window sizes and thresholds. \citet{faggian2015} showed that this
+windowed summation can be computed very efficiently using a \emph{summed area
+table} (also called an integral image): the table is built once per threshold
+with two cumulative sums, after which the sum over any rectangular window is
+obtained from just four array lookups, independent of the window size. This is
+the algorithm implemented in \texttt{fss\_SAT.py}.
+
+\subsection{Scope of this document}
+
+\texttt{fss\_SAT.py} started from the reference Python implementation in the
+appendix of \citet{faggian2015}. The purpose of this document is to record the
+\emph{adaptations and extensions} that were made on top of that baseline. It is
+organised as follows:
+
+\begin{itemize}
+  \item Section~\ref{sec:baseline} recaps the SAT algorithm of
+        \citet{faggian2015} and its reference implementation, establishing the
+        notation and the starting point for the changes.
+  \item Section~\ref{sec:adaptations} documents each adaptation made in
+        \texttt{fss\_SAT.py}: the performance rewrites that preserve the
+        original result bit-for-bit, the feature extensions (threshold modes,
+        percentile thresholds, ensemble FSS, parallelisation), and the
+        substantive algorithmic additions (missing-data handling and the
+        continuous/weighted FSS).
+\end{itemize}
+
+A companion FFT-based implementation (\texttt{fss\_FFT.py}) and an OpenCL
+implementation (\texttt{fss\_OCL.py}) exist in the same repository and compute
+the same score; they are out of scope here and documented separately.

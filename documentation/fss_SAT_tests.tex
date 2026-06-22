@@ -1,0 +1,129 @@
+\section{Verification and test suite}
+\label{sec:tests}
+
+The adaptations of Section~\ref{sec:adaptations} are guarded by an automated
+\codeword{pytest} suite, \codeword{test_fss_consistency.py}. It serves two
+purposes at once: it is a \emph{regression} suite that pins the behaviour of the
+SAT code documented here, and a \emph{cross-method consistency} suite that checks
+the SAT implementation against the two sibling backends in the repository --- the
+FFT reference (\codeword{fss_FFT.py}) and the OpenCL implementation
+(\codeword{fss_OCL.py}). Agreement between three independent code paths that
+compute the same score is a strong correctness signal, and it is what lets the
+performance rewrites of Sections~\ref{sec:filter}--\ref{sec:score} be trusted to
+leave the result unchanged.
+
+All tests run on a small set of reproducible Gaussian-bell fields built from a
+fixed seed, so every value is deterministic. Two tolerances are used when
+comparing methods, reflecting genuine algorithmic differences rather than bugs:
+
+\begin{description}
+  \item[$10^{-5}$] between SAT and OpenCL --- the \emph{same} algorithm, the only
+        difference being \codeword{float32} arithmetic on the device versus
+        \codeword{float64} on the host;
+  \item[$10^{-3}$] between FFT and SAT --- the FFT convolution zero-pads at the
+        domain boundary whereas the SAT filter edge-clamps
+        (Section~\ref{sec:filter}), so the two agree in the interior but differ
+        in a boundary frame.
+\end{description}
+
+The suite is run with
+
+{\setstretch{1}\begin{lstlisting}[style=bash]
+pytest test_fss_consistency.py -v
+\end{lstlisting}}
+
+\noindent and requires no arguments. The OpenCL tests detect whether a
+\codeword{pyopencl} runtime is available and \emph{skip} themselves when it is
+not, so the suite passes on a machine without a GPU/OpenCL stack.
+
+\subsection{Coverage}
+\label{sec:tests-coverage}
+
+Table~\ref{tab:tests} groups the checks by theme. The right-hand column records
+which of the three backends each theme exercises (S\,=\,SAT, F\,=\,FFT,
+O\,=\,OpenCL).
+
+\begin{table}[ht!]
+\centering
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{l X c}
+\toprule
+\textbf{Theme} & \textbf{What is verified} & \textbf{Backends} \\
+\midrule
+Cross-method
+  & FFT, SAT and OpenCL scores agree within tolerance across thresholds
+    $\times$ windows & S,F,O \\
+Mathematical properties
+  & perfect forecast $\to 1$, FSS $\in [0,1]$, NaN when no exceedances,
+    monotonicity in window size, forecast/observation symmetry & S,F,O \\
+Batch interfaces
+  & \texttt{fss\_threshold}, \texttt{fss\_cumsum\_parallel} and
+    \texttt{fss\_opencl\_arr} match the per-call single results & S,O \\
+Regression guards
+  & pinned reference scores for fixed (threshold, window) pairs, including
+    every \texttt{threshold\_mode} & S \\
+Threshold modes
+  & \texttt{over}/\texttt{under}/\texttt{between}/\texttt{tolerance} preserve
+    invariants and partition the domain correctly; the tolerance window is
+    built from the forecast's own threshold on both bounds & S \\
+\texttt{CWFSS}
+  & R2 sequence, numerators / denominators / values / score and
+    \texttt{bootstrap} are bit-identical to the reference, plus invariants
+    and pinned values & S \\
+Missing data
+  & the masked path reduces \emph{exactly} to the clean path without NaNs, and
+    preserves all invariants under injected NaNs (see
+    Section~\ref{sec:tests-nan}) & S,F,O \\
+\bottomrule
+\end{tabularx}
+\caption{Themes covered by \texttt{test\_fss\_consistency.py} and the backends
+each one exercises (S\,=\,SAT, F\,=\,FFT, O\,=\,OpenCL).}
+\label{tab:tests}
+\end{table}
+
+\subsection{The missing-data tests}
+\label{sec:tests-nan}
+
+Because the missing-data handling of Section~\ref{sec:nan} is the most
+substantial addition, it carries the most checks, and they are mirrored across
+all three backends (deterministic and ensemble for SAT and FFT; deterministic
+for OpenCL, which has no ensemble entry point). The key guarantees are:
+
+\begin{description}
+  \item[Reduction to the clean path.] On NaN-free fields the masked score of
+        Eq.~\eqref{eq:maskedscore} is compared against the ordinary fast path.
+        For SAT and FFT this matches to machine precision ($\sim 10^{-9}$ or
+        better), confirming that the valid count $C$ of
+        Eq.~\eqref{eq:validcount} collapses to the constant window area $A$ when
+        nothing is missing; for OpenCL it matches to the \codeword{float32}
+        tolerance $10^{-5}$. A companion test verifies directly that
+        $C \equiv A$ everywhere in the absence of NaNs.
+  \item[Invariants under NaN.] With NaNs injected into both fields, the score
+        stays in $[0,1]$, a perfect forecast (sharing the observation's NaNs)
+        still scores $1$, the forecast/observation symmetry holds, and an
+        all-missing field yields NaN rather than a spurious number.
+  \item[Weighting semantics.] A hand-rolled weighted mean reproduces
+        \codeword{_fss_score_masked}, pinning the per-window valid-point
+        weighting of Eq.~\eqref{eq:maskedscore}.
+  \item[Ensemble specifics.] A member that is entirely NaN does not change the
+        score (the average is over valid members only), and the
+        \codeword{nanpercentile} threshold path stays finite.
+  \item[Cross-method agreement.] The FFT and OpenCL masked paths are checked
+        against the SAT masked path. OpenCL also edge-clamps, so it agrees with
+        SAT as closely as on clean data; FFT zero-pads, so it agrees within the
+        interior at the usual $10^{-3}$ boundary tolerance.
+  \item[Auto-dispatch.] Calling the public entry points
+        (\codeword{fss_threshold}, \codeword{fourier_fss},
+        \codeword{fourier_fss_eps}, \codeword{fss_opencl}) on a field that
+        contains a NaN routes to the masked path automatically --- important for
+        the FFT, where a raw NaN passed through \codeword{fftconvolve} would
+        otherwise spread across the entire output.
+\end{description}
+
+\subsection{Result}
+\label{sec:tests-result}
+
+The suite currently comprises \textbf{308 tests}. With an OpenCL runtime present
+all \textbf{308 pass}; on a machine without OpenCL the \textbf{60} device-backed
+tests skip and the remaining \textbf{248 pass}. A representative run completes in
+roughly six seconds.

@@ -1,0 +1,82 @@
+\section{The summed area table baseline}
+\label{sec:baseline}
+
+This section recaps the algorithm of \citet{faggian2015} as far as it is needed
+to follow the adaptations in Section~\ref{sec:adaptations}. The notation follows
+the paper.
+
+\subsection{Summed area table and windowed sums}
+
+A field is first reduced to a binary event field $I$ by thresholding (for the
+classic FSS, $I(i,j)=1$ where the field exceeds the threshold and $0$
+otherwise). The summed area table $\hat{O}$ stores at each point the sum of all
+cells above and to the left, inclusive:
+%
+\begin{equation}
+  \hat{O}(i,j) = \sum_{\hat{\imath}\le i}\;\sum_{\hat{\jmath}\le j}
+                 O(\hat{\imath},\hat{\jmath}).
+  \label{eq:sat}
+\end{equation}
+%
+In the code this is a double cumulative sum (\codeword{compute_integral_table}):
+
+{\setstretch{1}\begin{lstlisting}[style=python]
+def compute_integral_table(field):
+    if field.ndim == 2:
+        return field.cumsum(1).cumsum(0)
+    elif field.ndim == 3:
+        return field.cumsum(2).cumsum(1)
+\end{lstlisting}}
+
+Once $\hat{O}$ is available, the sum over a window of half-width $w$ centred on
+$(i,j)$ is obtained from just four lookups,
+%
+\begin{equation}
+  \sum_{\hat{\imath}=i-w}^{i+w}\;\sum_{\hat{\jmath}=j-w}^{j+w}
+  O(\hat{\imath},\hat{\jmath})
+  = \hat{O}(i+w, j+w) + \hat{O}(i-w, j-w)
+  - \hat{O}(i-w, j+w) - \hat{O}(i+w, j-w),
+  \label{eq:boxsum}
+\end{equation}
+%
+\emph{independent of the window size}. This is the key property that makes the
+SAT method cheap when many window sizes are evaluated per threshold: the table
+is built once, and every window size is then four array lookups per grid point.
+In the code the windowed sum is \codeword{integral_filter}.
+
+\subsection{Boundary conditions}
+
+Windows centred near the edge of the domain extend beyond the indexable region
+of the table. \citet{faggian2015} clip the corner coordinates of
+Eq.~\eqref{eq:boxsum} to the valid index range, which is how the reference
+implementation (and \texttt{fss\_SAT.py}) handle the boundary. The reference
+code realises the clip with \codeword{np.mgrid} and \codeword{np.clip}:
+
+{\setstretch{1}\begin{lstlisting}[style=python]
+r, c = np.mgrid[0:rows, 0:cols]
+r0, c0 = (np.clip(r - w, 0, rows - 1), np.clip(c - w, 0, cols - 1))
+r1, c1 = (np.clip(r + w, 0, rows - 1), np.clip(c + w, 0, cols - 1))
+integral_table  = field[..., r1, c1] + field[..., r0, c0]
+integral_table -= field[..., r0, c1] + field[..., r1, c0]
+\end{lstlisting}}
+
+\subsection{From windowed sums to the score}
+
+Dividing each windowed sum by the window area $(2w+1)^2$ gives the fractions
+$p_f$ and $p_o$ of Eq.~\eqref{eq:fss}. The reference \codeword{fss} routine
+forms the fractions explicitly and evaluates the numerator and denominator with
+\codeword{np.nanmean}:
+
+{\setstretch{1}\begin{lstlisting}[style=python]
+inv_window_area = 1. / (2. * w + 1.) ** 2
+fhat = fhat * inv_window_area
+ohat = ohat * inv_window_area
+num   = np.nanmean(np.power(fhat - ohat, 2))
+denom = np.nanmean(np.power(fhat, 2) + np.power(ohat, 2))
+ret = num, denom, 1. - num / denom
+\end{lstlisting}}
+
+The higher-level routines (\codeword{fss_threshold}, \codeword{fss_cumsum_*},
+\codeword{CWFSS}) build the binary tables once per threshold and call
+\codeword{fss}/\codeword{integral_filter} for every requested window. This is
+the structure that Section~\ref{sec:adaptations} modifies.

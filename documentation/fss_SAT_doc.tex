@@ -1,0 +1,142 @@
+\documentclass[a4paper,12pt]{article}
+% packages!
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}% http://ctan.org/pkg/amssymb
+\usepackage{booktabs}
+\usepackage{color}
+\usepackage{dirtree}
+\usepackage{fancyhdr}
+%\usepackage[cm]{fullpage}
+\usepackage[width=14.5cm,
+            height=25cm,
+            top=2.5cm,
+            inner=1.5cm,
+            outer=1.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{grffile} % avoids errors when there are multiple dots in file names
+\usepackage{listings}
+\usepackage{longtable}
+\usepackage{lscape}
+\usepackage{lmodern}
+\usepackage{makecell}
+\usepackage{natbib}
+\usepackage{pifont}% http://ctan.org/pkg/pifont
+\usepackage{pbox}
+\usepackage{sansmath}
+\usepackage{setspace}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{xparse}
+% Alter some LaTeX defaults for better treatment of figures:
+    \renewcommand{\topfraction}{0.9}    % max fraction of floats at top
+    \renewcommand{\bottomfraction}{0.8} % max fraction of floats at bottom
+    \setcounter{topnumber}{2}
+    \setcounter{bottomnumber}{2}
+    \setcounter{totalnumber}{4}     % 2 may work better
+    \setcounter{dbltopnumber}{2}    % for 2-column pages
+    \renewcommand{\dbltopfraction}{0.9} % fit big float above 2-col. text
+    \renewcommand{\textfraction}{0.07}  % allow minimal text w. figs
+    \renewcommand{\floatpagefraction}{0.7}      % require fuller float pages
+    \renewcommand{\dblfloatpagefraction}{0.7}   % require fuller float pages
+
+\renewcommand*\familydefault{\sfdefault}
+\sansmath
+
+\definecolor{darkgreen}{rgb}{0,0.6,0}
+\definecolor{darkred}{rgb}{0.85,0,0}
+\definecolor{gray}{rgb}{0.5,0.5,0.5}
+\definecolor{mauve}{rgb}{0.58,0,0.82}
+\definecolor{graybg}{rgb}{0.95,0.95,0.95}
+
+\newcommand{\cmark}{\textcolor{darkgreen}{\ding{51}}}%
+\newcommand{\xmark}{\textcolor{darkred}{\ding{55}}}%
+\newcommand{\smark}{\ding{72}}%
+\NewDocumentCommand{\codeword}{v}{%
+\texttt{\textcolor{blue}{#1}}%
+}
+
+% set presets for Python code:
+\lstdefinestyle{python}{
+  language=Python
+}
+\lstdefinestyle{bash}{
+  language=bash
+}
+\lstset{
+   basicstyle={\footnotesize\ttfamily},
+   showstringspaces=false,
+   keywordstyle={\bfseries\color{blue}},
+   numbers=none,
+   numberstyle=\tiny\color{gray},
+   commentstyle=\color{darkgreen},
+   stringstyle=\color{mauve},
+   breaklines=true,
+   backgroundcolor=\color{graybg}
+}
+
+% Hurenkinder und Schusterjungen verhindern
+\clubpenalty10000
+\widowpenalty10000
+\displaywidowpenalty=10000
+
+%opening
+\title{Documentation of the adapted Fractions Skill Score:\\
+       Summed Area Table implementation (\texttt{fss\_SAT.py})}
+\author{Phillip Scheffknecht}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\rightmark}
+\lhead{FSS --- SAT method}
+\rfoot{Page \thepage}
+
+\begin{document}
+\begin{spacing}{1.05}
+\maketitle
+
+\begin{abstract}
+This document describes \texttt{fss\_SAT.py}, the summed area table (SAT)
+implementation of the Fractions Skill Score (FSS). The implementation is based
+on the reference code published by \citet{faggian2015}. We first recap the SAT
+algorithm and its reference implementation, and then document the adaptations
+and extensions made on top of it: a vectorised neighbourhood filter, a
+BLAS-based score evaluation, additional threshold modes, percentile thresholds,
+an over-estimation diagnostic, an ensemble (eFSS) variant, parallelisation over
+thresholds, transparent handling of missing (NaN) data through per-window
+valid-point weighting, and the continuous/weighted FSS (\texttt{CWFSS}). A final
+section documents the automated cross-method test suite that guards these
+adaptations.\\
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\include{fss_SAT_introduction}
+
+\include{fss_SAT_baseline}
+
+\include{fss_SAT_adaptations}
+
+\include{fss_SAT_tests}
+
+\begin{thebibliography}{9}
+\bibitem[Faggian et al.(2015)]{faggian2015}
+Faggian, N., Roux, B., Steinle, P. and Ebert, B., 2015:
+\textit{Fast calculation of the fractions skill score.}
+MAUSAM, \textbf{66}, 3, 457--466.
+
+\bibitem[Roberts and Lean(2008)]{roberts2008}
+Roberts, N. M. and Lean, H. W., 2008:
+\textit{Scale-selective verification of rainfall accumulations from
+high-resolution forecasts of convective events.}
+Mon. Wea. Rev., \textbf{136}, 78--97.
+
+\bibitem[Duc et al.(2013)]{duc2013}
+Duc, L., Saito, K. and Seko, H., 2013:
+\textit{Spatial-temporal fractions verification for high-resolution ensemble
+forecasts.} Tellus A, \textbf{65}.
+\end{thebibliography}
+
+\end{spacing}
+\end{document}
